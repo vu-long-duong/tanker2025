@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tank Battle — 1P vs AI (HTML/JS)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#141821; --hud:#1b2130; --accent:#6cf; --good:#46e38c; --bad:#ff6b6b; --warn:#ffd166;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;}
+  .wrap{display:grid;grid-template-columns:auto 520px;gap:18px;place-content:center;min-height:100%;padding:16px}
+  .panel{background:var(--panel);border:1px solid #222a3a;border-radius:16px;box-shadow:0 6px 30px rgba(0,0,0,.35)}
+  #gameHolder{padding:16px}
+  #gameCanvas{image-rendering:pixelated;background:#5b7c5f;border-radius:12px;border:2px solid #2a3347}
+  #hud{display:grid;grid-template-rows:auto 1fr auto;gap:12px;padding:16px}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .badge{padding:6px 10px;border-radius:999px;background:var(--hud);border:1px solid #263048}
+  .pill{padding:2px 10px;border-radius:8px;background:#101522}
+  h1{font-size:18px;margin:0 0 4px 0;color:#c8e1ff}
+  small{opacity:.8}
+  button{appearance:none;background:var(--accent);border:none;color:#001019;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .legend{font-size:13px;line-height:1.4}
+  .legend b{color:#c8e1ff}
+  .hr{height:1px;background:#222a3a;margin:8px 0}
+  .log{height:140px;overflow:auto;background:#0e1422;border:1px solid #222a3a;border-radius:8px;padding:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel" id="gameHolder">
+      <canvas id="gameCanvas" width="480" height="480"></canvas>
+    </div>
+    <div class="panel" id="hud">
+      <div>
+        <h1>Tank Battle — Single Level</h1>
+        <small>Phím: ⬆️⬇️⬅️➡️ di chuyển • Space bắn • Mục tiêu: diệt tối đa 20 địch và bảo vệ đại bàng trong 3 phút.</small>
+      </div>
+      <div class="row" id="stats">
+        <div class="badge">Mạng: <b id="lives">3</b></div>
+        <div class="badge">Máu: <b id="hp">3</b></div>
+        <div class="badge">Đạn: <b id="power">1</b></div>
+        <div class="badge">Level: <b id="level">1</b></div>
+        <div class="badge">Địch còn: <b id="enemiesLeft">20</b></div>
+        <div class="badge">Score: <b id="score">0</b></div>
+        <div class="badge">Time: <b id="timer">03:00</b></div>
+        <div class="pill" id="baseShield">Căn cứ: <b>Gạch</b></div>
+      </div>
+      <div class="legend">
+        <div><b>Địa hình</b>: 🧱 Gạch(HP1) • 🧊 Thép(HP3) • 🌊 Sông (chặn xe, đạn bay qua) • 🌿 Bụi (che tầm nhìn) • 🦅 Đại bàng</div>
+        <div><b>Vật phẩm</b>: ⭐ Star (+Power, tối đa 3, xuất hiện 3 lần) • ⛏️ Shovel (tường căn cứ thành Thép 20s, xuất hiện 2 lần)</div>
+      </div>
+      <div class="hr"></div>
+      <div class="row">
+        <button id="btnStart">Bắt đầu / Chơi lại</button>
+        <button id="btnPause">Tạm dừng</button>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+<script>
+// =====================
+// Tank Battle — 1P vs AI
+// Specs: 15x15 grid, single level, 3 lives, 3 HP each life
+// 20 enemies total: 10 Basic (hp1, power1) + 10 Armored (hp3, power2)
+// Player power upgrades via Star (3 spawns), Shovel shields base walls with steel for 20s (2 spawns)
+// Timeout 180s -> score result
+// =====================
+(() => {
+  const TILE = 32; // 15*32 = 480
+  const W = 15, H = 15;
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const ui = {
+    lives: document.getElementById('lives'),
+    hp: document.getElementById('hp'),
+    power: document.getElementById('power'),
+    level: document.getElementById('level'),
+    enemiesLeft: document.getElementById('enemiesLeft'),
+    score: document.getElementById('score'),
+    timer: document.getElementById('timer'),
+    baseShield: document.getElementById('baseShield'),
+    log: document.getElementById('log'),
+    start: document.getElementById('btnStart'),
+    pause: document.getElementById('btnPause'),
+  };
+
+  const rand = (a,b)=>Math.random()*(b-a)+a;
+  const randi = (a,b)=>Math.floor(rand(a,b+1));
+
+  const T_EMPTY=0, T_BRICK=1, T_STEEL=2, T_RIVER=3, T_BUSH=4, T_BASE=5;
+
+  // Map blueprint: base (eagle) at bottom center (row 13-14 area)
+  // We'll draw a simple arena with walls and rivers.
+  const basePos = {x:7, y:14}; // tile coords for base (center bottom row)
+
+  function makeLevel(){
+    const g = Array.from({length:H},()=>Array(W).fill(T_EMPTY));
+    // Border steels (top and sides)
+    for(let x=0;x<W;x++){ if (x%2===0) g[0][x]=T_STEEL; }
+    for(let y=1;y<H;y++){ if (y%2===0) g[y][0]=T_STEEL; if (y%2===1) g[y][W-1]=T_STEEL; }
+    // Some brick blocks
+    for(let y=2;y<12;y+=2){
+      for(let x=2;x<13;x+=3){ g[y][x]=T_BRICK; }
+    }
+    // Rivers across middle
+    for(let x=4;x<=10;x++) g[7][x]=T_RIVER;
+    // Bush lines near center
+    for(let x=3;x<=11;x+=2) g[6][x]=T_BUSH;
+    for(let x=3;x<=11;x+=2) g[8][x]=T_BUSH;
+
+    // Base eagle
+    g[basePos.y][basePos.x]=T_BASE;
+
+    // Surround base with two layers of brick
+    const ring = [
+      {x:basePos.x-1,y:basePos.y-1},{x:basePos.x,y:basePos.y-1},{x:basePos.x+1,y:basePos.y-1},
+      {x:basePos.x-1,y:basePos.y},{x:basePos.x+1,y:basePos.y},
+      {x:basePos.x-1,y:basePos.y+1},{x:basePos.x,y:basePos.y+1},{x:basePos.x+1,y:basePos.y+1},
+    ];
+    for(const t of ring){ if(inBounds(t.x,t.y)) g[t.y][t.x]=T_BRICK; }
+
+    // Second outer ring bricks
+    const ring2 = [
+      {x:basePos.x-2,y:basePos.y-2},{x:basePos.x-1,y:basePos.y-2},{x:basePos.x,y:basePos.y-2},{x:basePos.x+1,y:basePos.y-2},{x:basePos.x+2,y:basePos.y-2},
+      {x:basePos.x-2,y:basePos.y-1},{x:basePos.x+2,y:basePos.y-1},
+      {x:basePos.x-2,y:basePos.y},{x:basePos.x+2,y:basePos.y},
+      {x:basePos.x-2,y:basePos.y+1},{x:basePos.x+2,y:basePos.y+1},
+      {x:basePos.x-2,y:basePos.y+2},{x:basePos.x-1,y:basePos.y+2},{x:basePos.x,y:basePos.y+2},{x:basePos.x+1,y:basePos.y+2},{x:basePos.x+2,y:basePos.y+2},
+    ];
+    for(const t of ring2){ if(inBounds(t.x,t.y)) g[t.y][t.x]=T_BRICK; }
+
+    return g;
+  }
+
+  function inBounds(x,y){ return x>=0 && y>=0 && x<W && y<H; }
+
+  // Steel HP map (only for steel tiles). Brick is HP1 so destroy on hit.
+  function buildSteelHP(grid){
+    const hp = Array.from({length:H},()=>Array(W).fill(0));
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(grid[y][x]===T_STEEL) hp[y][x]=3; // armor 3
+    return hp;
+  }
+
+  // Entities
+  class Tank{
+    constructor(x,y,enemy=false,type='player'){
+      this.x=x; this.y=y; // pixel
+      this.dir=0; // radians
+      this.speed = enemy? 60: 90; // px/s
+      this.size=22; // collision radius
+      this.cooldown=0;
+      this.maxHP = enemy ? (type==='armored'?3:1) : 3; // player tank hp per life
+      this.hp = this.maxHP;
+      this.power = enemy ? (type==='armored'?2:1) : 1; // bullet power
+      this.enemy = enemy;
+      this.type = type;
+      this.fireDelay = enemy? 0.9: 0.25; // seconds
+      this.aiTimer = 0; // for AI decision
+    }
+  }
+
+  class Bullet{
+    constructor(x,y,dir,power,owner){
+      this.x=x; this.y=y; this.dir=dir; this.speed=260; this.power=power; this.life=2.5; this.owner=owner; this.r=4;
+    }
+  }
+
+  // Game State
+  const state = {
+    running:false, paused:false,
+    grid:null, steelHP:null, bushes:[],
+    player:null, bullets:[], enemies:[],
+    lives:3, score:0, level:1,
+    timeLeft:180,
+    baseSteel:false, baseSteelUntil:0,
+    enemiesRemaining:{ basic:10, armored:10 },
+    enemiesAlive:0, enemiesCap:4,
+    items:[], itemSchedule:[],
+    starCollected:0, shovelCollected:0,
+    result:null,
+  };
+
+  // Spawns
+  const spawnPoints = [ {x:1*TILE+16, y:1*TILE+16}, {x:7*TILE+16, y:1*TILE+16}, {x:13*TILE+16, y:1*TILE+16} ];
+  function spawnEnemy(type){
+    if (state.enemiesAlive >= state.enemiesCap) return;
+    if (type==='basic' && state.enemiesRemaining.basic<=0) return;
+    if (type==='armored' && state.enemiesRemaining.armored<=0) return;
+    const p = spawnPoints[randi(0,spawnPoints.length-1)];
+    const t = new Tank(p.x, p.y, true, type);
+    t.speed = type==='armored'? 55: 70;
+    t.fireDelay = type==='armored'? 1.2: 1.0;
+    // try avoid spawning inside blocking tile
+    if(!isFreeCircle(t.x,t.y,12)) return; // skip if blocked
+    state.enemies.push(t);
+    state.enemiesAlive++;
+    state.enemiesRemaining[type]--;
+  }
+
+  function ensureSpawns(){
+    // Maintain up to cap enemies on field
+    while(state.enemiesAlive < state.enemiesCap){
+      // Prefer mix: alternate types if available
+      const pickArmored = Math.random()<0.5;
+      if (pickArmored) {
+        if (state.enemiesRemaining.armored>0) spawnEnemy('armored');
+        else if (state.enemiesRemaining.basic>0) spawnEnemy('basic');
+        else break;
+      } else {
+        if (state.enemiesRemaining.basic>0) spawnEnemy('basic');
+        else if (state.enemiesRemaining.armored>0) spawnEnemy('armored');
+        else break;
+      }
+    }
+  }
+
+  // Items: type 'star' or 'shovel'
+  function scheduleItems(){
+    state.itemSchedule.length=0;
+    // 3 stars, 2 shovels randomly within 180s, not too early/late
+    const times = new Set();
+    function pick(){ let t; do{ t = Math.floor(rand(8, 170)); } while(times.has(t)); times.add(t); return t; }
+    for(let i=0;i<3;i++) state.itemSchedule.push({time: pick(), type:'star', spawned:false});
+    for(let i=0;i<2;i++) state.itemSchedule.push({time: pick(), type:'shovel', spawned:false});
+    state.itemSchedule.sort((a,b)=>a.time-b.time);
+  }
+
+  function spawnItem(type){
+    // find random empty tile not near river/steel ideally
+    for(let tries=0; tries<60; tries++){
+      const tx = randi(1, W-2), ty = randi(1, H-3); // avoid very bottom
+      if (state.grid[ty][tx]===T_EMPTY){
+        const x = tx*TILE+16, y = ty*TILE+16;
+        state.items.push({type, x, y, r:10, ttl:20}); // disappears after 20s if not taken
+        log(`Vật phẩm xuất hiện: ${type==='star'?'⭐ Star':'⛏️ Shovel'}`);
+        return;
+      }
+    }
+  }
+
+  // Init / Reset
+  function reset(){
+    state.grid = makeLevel();
+    state.steelHP = buildSteelHP(state.grid);
+    state.bushes = []; // remember bush positions for draw on top
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(state.grid[y][x]===T_BUSH) state.bushes.push({x,y});
+
+    state.player = new Tank(basePos.x*TILE+16, (basePos.y-1)*TILE+16, false, 'player');
+    state.player.speed = 100; state.player.fireDelay=0.18; state.player.hp = 3; state.player.power = 1;
+
+    state.bullets.length=0; state.enemies.length=0; state.items.length=0;
+    state.lives=3; state.score=0; state.level=1; state.timeLeft=180; state.result=null;
+    state.baseSteel=false; state.baseSteelUntil=0;
+    state.enemiesRemaining={basic:10, armored:10}; state.enemiesAlive=0; state.starCollected=0; state.shovelCollected=0;
+    scheduleItems();
+    ensureSpawns();
+    updateHUD();
+  }
+
+  // Input
+  const keys={};
+  window.addEventListener('keydown',e=>{
+    if(e.code==='Space'){ shoot(state.player); e.preventDefault(); }
+    keys[e.code]=true;
+  });
+  window.addEventListener('keyup',e=>{ keys[e.code]=false; });
+
+  function shoot(tank){
+    if (tank.cooldown>0) return;
+    const b = new Bullet(tank.x, tank.y, tank.dir, tank.power, tank);
+    state.bullets.push(b);
+    tank.cooldown = tank.fireDelay;
+  }
+
+  function canPassTile(tile){ return tile===T_EMPTY || tile===T_BUSH; }
+  function blocksMovement(tile){ return tile===T_BRICK || tile===T_STEEL || tile===T_RIVER || tile===T_BASE; }
+
+  function isFreeCircle(x,y,r){
+    // sample four corners/compass points
+    const pts = [ [x-r,y], [x+r,y], [x,y-r], [x,y+r] ];
+    for(const [px,py] of pts){
+      const tx = Math.floor(px/TILE), ty = Math.floor(py/TILE);
+      if(!inBounds(tx,ty)) return false;
+      const t = state.grid[ty][tx];
+      if (blocksMovement(t)) return false;
+    }
+    return true;
+  }
+
+  function moveTank(tank,dt,dirX,dirY){
+    let dx=dirX, dy=dirY;
+    if (dx||dy){
+      const len = Math.hypot(dx,dy)||1; dx/=len; dy/=len;
+      const nx = tank.x + dx*tank.speed*dt;
+      const ny = tank.y + dy*tank.speed*dt;
+      if (isFreeCircle(nx, tank.y, tank.size*0.6)) tank.x = nx;
+      if (isFreeCircle(tank.x, ny, tank.size*0.6)) tank.y = ny;
+      tank.dir = Math.atan2(dy,dx);
+    }
+  }
+
+  function updateBullets(dt){
+    for(const b of state.bullets){ b.x += Math.cos(b.dir)*b.speed*dt; b.y += Math.sin(b.dir)*b.speed*dt; b.life -= dt; }
+    // collisions with tiles
+    for(let i=state.bullets.length-1;i>=0;i--){
+      const b = state.bullets[i];
+      if (b.life<=0){ state.bullets.splice(i,1); continue; }
+      if (b.x<0||b.y<0||b.x>canvas.width||b.y>canvas.height){ state.bullets.splice(i,1); continue; }
+      const tx = Math.floor(b.x/TILE), ty = Math.floor(b.y/TILE);
+      if(!inBounds(tx,ty)) { state.bullets.splice(i,1); continue; }
+      const t = state.grid[ty][tx];
+      // River & Bush do not block bullets
+      if (t===T_BRICK){
+        // destroy brick
+        state.grid[ty][tx]=T_EMPTY; state.bullets.splice(i,1); continue;
+      }
+      if (t===T_STEEL){
+        state.steelHP[ty][tx] -= b.power;
+        if (state.steelHP[ty][tx]<=0){ state.grid[ty][tx]=T_EMPTY; }
+        state.bullets.splice(i,1); continue;
+      }
+      if (t===T_BASE){
+        // base destroyed -> lose
+        state.result = 'lose_base';
+        state.running=false; state.paused=false;
+        log('❌ Căn cứ bị phá hủy!');
+        break;
+      }
+    }
+    // collisions with tanks
+    for(let i=state.bullets.length-1;i>=0;i--){
+      const b = state.bullets[i];
+      const hitPlayer = b.owner.enemy && dist(b.x,b.y,state.player.x,state.player.y) < (state.player.size*0.5+4);
+      if (hitPlayer){
+        damagePlayer(b.power); state.bullets.splice(i,1); continue;
+      }
+      // enemies
+      for(let j=state.enemies.length-1;j>=0;j--){
+        const e = state.enemies[j];
+        if (!b.owner.enemy && dist(b.x,b.y,e.x,e.y) < (e.size*0.5+4)){
+          e.hp -= b.power;
+          state.bullets.splice(i,1);
+          if (e.hp<=0){
+            // kill
+            const killedType = e.type;
+            state.enemies.splice(j,1); state.enemiesAlive--; 
+            const pts = (killedType==='armored'?200:100);
+            state.score += pts;
+            log(`💥 Hạ ${killedType==='armored'?'Amored':'Basic'} tank (+${pts}đ)`);
+            // spawn a same-type replacement if remaining of that type
+            spawnEnemy(killedType);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  function damagePlayer(dmg){
+    state.player.hp -= dmg;
+    if (state.player.hp<=0){
+      state.lives -= 1;
+      if (state.lives<=0){
+        state.result='lose_lives'; state.running=false; state.paused=false; log('❌ Hết 3 mạng — Thua!');
+      } else {
+        // respawn with full HP at base spawn
+        state.player.hp = 3; state.player.x = basePos.x*TILE+16; state.player.y = (basePos.y-1)*TILE+16; state.player.dir=0; state.player.power = Math.max(1,state.player.power); // keep power
+        log(`⚠️ Mất 1 mạng, còn ${state.lives} mạng. HP hồi về 3.`);
+      }
+    }
+  }
+
+  function aiUpdate(dt){
+    for(const e of state.enemies){
+      e.aiTimer -= dt;
+      if (e.aiTimer<=0){
+        // choose new direction roughly toward base or player sometimes
+        const aimTarget = Math.random()<0.5 ? state.player : {x: basePos.x*TILE+16, y: basePos.y*TILE+16};
+        const angle = Math.atan2(aimTarget.y - e.y, aimTarget.x - e.x);
+        // add noise
+        const jitter = rand(-0.7,0.7);
+        e.dir = angle + jitter;
+        e.aiTimer = rand(0.6, 1.8);
+      }
+      // move
+      const dx = Math.cos(e.dir), dy = Math.sin(e.dir);
+      moveTank(e, dt, dx, dy);
+      // shoot sometimes if roughly facing player or base
+      e.cooldown -= dt; if (e.cooldown<0) e.cooldown=0;
+      const target = state.player;
+      const angToPlayer = Math.atan2(target.y-e.y, target.x-e.x);
+      const angleDiff = Math.abs(normAngle(angToPlayer - e.dir));
+      if (angleDiff < 0.6 && e.cooldown<=0){ shoot(e); }
+    }
+  }
+
+  function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
+  function normAngle(a){ a = (a+Math.PI*2)%(Math.PI*2); if (a>Math.PI) a-=Math.PI*2; return a; }
+
+  // Base wall shield logic (Shovel)
+  function setBaseShield(on){
+    const ring = [
+      {x:basePos.x-1,y:basePos.y-1},{x:basePos.x,y:basePos.y-1},{x:basePos.x+1,y:basePos.y-1},
+      {x:basePos.x-1,y:basePos.y},{x:basePos.x+1,y:basePos.y},
+      {x:basePos.x-1,y:basePos.y+1},{x:basePos.x,y:basePos.y+1},{x:basePos.x+1,y:basePos.y+1},
+    ];
+    const ring2 = [
+      {x:basePos.x-2,y:basePos.y-2},{x:basePos.x-1,y:basePos.y-2},{x:basePos.x,y:basePos.y-2},{x:basePos.x+1,y:basePos.y-2},{x:basePos.x+2,y:basePos.y-2},
+      {x:basePos.x-2,y:basePos.y-1},{x:basePos.x+2,y:basePos.y-1},
+      {x:basePos.x-2,y:basePos.y},{x:basePos.x+2,y:basePos.y},
+      {x:basePos.x-2,y:basePos.y+1},{x:basePos.x+2,y:basePos.y+1},
+      {x:basePos.x-2,y:basePos.y+2},{x:basePos.x-1,y:basePos.y+2},{x:basePos.x,y:basePos.y+2},{x:basePos.x+1,y:basePos.y+2},{x:basePos.x+2,y:basePos.y+2},
+    ];
+    const tiles = [...ring, ...ring2];
+    if (on){
+      for(const t of tiles){ if(inBounds(t.x,t.y)){ state.grid[t.y][t.x]=T_STEEL; state.steelHP[t.y][t.x]=3; } }
+      state.baseSteel=true; state.baseSteelUntil = performance.now()/1000 + 20; ui.baseShield.innerHTML = 'Căn cứ: <b>Thép (20s)</b>';
+    } else {
+      for(const t of tiles){ if(inBounds(t.x,t.y)){ state.grid[t.y][t.x]=T_BRICK; } }
+      state.baseSteel=false; ui.baseShield.innerHTML = 'Căn cứ: <b>Gạch</b>';
+    }
+  }
+
+  // Items update
+  function updateItems(dt, timeSec){
+    // spawn scheduled
+    for(const s of state.itemSchedule){
+      if (!s.spawned && timeSec<= (180 - s.time)){
+        s.spawned = true; spawnItem(s.type);
+      }
+    }
+    // tick TTL and pickup
+    for(let i=state.items.length-1;i>=0;i--){
+      const it = state.items[i];
+      it.ttl -= dt; if (it.ttl<=0){ state.items.splice(i,1); continue; }
+      if (dist(it.x,it.y,state.player.x,state.player.y) < 18){
+        if (it.type==='star'){
+          state.player.power = Math.min(3, state.player.power+1);
+          state.score += 50; state.starCollected++;
+          log('⭐ Nhặt Star: +Power (tối đa 3) +50đ');
+        } else if (it.type==='shovel'){
+          setBaseShield(true); state.score += 50; state.shovelCollected++;
+          log('⛏️ Nhặt Shovel: tường căn cứ thành Thép trong 20s (+50đ)');
+        }
+        state.items.splice(i,1);
+      }
+    }
+    // turn off shield when expired
+    if (state.baseSteel && performance.now()/1000 >= state.baseSteelUntil){ setBaseShield(false); }
+  }
+
+  // HUD
+  function updateHUD(){
+    ui.lives.textContent = state.lives;
+    ui.hp.textContent = Math.max(0,state.player?.hp|0);
+    ui.power.textContent = state.player?.power|0;
+    ui.level.textContent = state.level;
+    const remain = state.enemiesRemaining.basic + state.enemiesRemaining.armored + state.enemiesAlive;
+    ui.enemiesLeft.textContent = remain;
+    ui.score.textContent = state.score;
+    const t = Math.max(0, Math.ceil(state.timeLeft));
+    const mm = String(Math.floor(t/60)).padStart(2,'0');
+    const ss = String(t%60).padStart(2,'0');
+    ui.timer.textContent = `${mm}:${ss}`;
+  }
+
+  function log(msg){
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+    ui.log.textContent += line;
+    ui.log.scrollTop = ui.log.scrollHeight;
+  }
+
+  // Draw
+  function draw(){
+    // ground color already via CSS; but we paint tiles
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    // Base background dirt
+    ctx.fillStyle = '#5b7c5f'; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // tiles
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const t = state.grid[y][x];
+        const px=x*TILE, py=y*TILE;
+        if (t===T_EMPTY){ /* draw subtle grid */ ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.strokeRect(px,py,TILE,TILE); }
+        else if (t===T_BRICK){ ctx.fillStyle='#ad6a5e'; ctx.fillRect(px+2,py+2,TILE-4,TILE-4); brickPattern(px,py); }
+        else if (t===T_STEEL){ ctx.fillStyle='#8ea6b3'; ctx.fillRect(px+1,py+1,TILE-2,TILE-2); ctx.strokeStyle='#334'; ctx.strokeRect(px+3,py+3,TILE-6,TILE-6); }
+        else if (t===T_RIVER){ ctx.fillStyle='#2e6f9e'; ctx.fillRect(px,py,TILE,TILE); wave(px,py); }
+        else if (t===T_BUSH){ ctx.fillStyle='#3b6d3f'; ctx.fillRect(px,py,TILE,TILE); }
+        else if (t===T_BASE){ ctx.fillStyle='#d9bf6a'; ctx.beginPath(); ctx.arc(px+16,py+16,10,0,Math.PI*2); ctx.fill(); ctx.fillStyle='#5a4720'; ctx.fillRect(px+12,py+12,8,8); }
+      }
+    }
+
+    // bullets under bushes
+    ctx.fillStyle='#222';
+    for(const b of state.bullets){ ctx.beginPath(); ctx.arc(b.x,b.y,4,0,Math.PI*2); ctx.fill(); }
+
+    // tanks
+    drawTank(state.player, '#2389ff');
+    for(const e of state.enemies){ drawTank(e, e.type==='armored'? '#d64e4e' : '#e2a04f'); }
+
+    // draw items
+    for(const it of state.items){
+      const c = it.type==='star'?'#ffd166':'#cbd5e1';
+      ctx.fillStyle=c; ctx.beginPath(); ctx.arc(it.x,it.y,8,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#111'; ctx.beginPath(); ctx.arc(it.x,it.y,8,0,Math.PI*2); ctx.stroke();
+      if (it.type==='star'){ // tiny star spokes
+        ctx.strokeStyle='#333';
+        for(let i=0;i<5;i++){ const a=i*1.256; ctx.beginPath(); ctx.moveTo(it.x+Math.cos(a)*2,it.y+Math.sin(a)*2); ctx.lineTo(it.x+Math.cos(a)*7,it.y+Math.sin(a)*7); ctx.stroke(); }
+      } else { // shovel icon
+        ctx.fillStyle='#111'; ctx.fillRect(it.x-2,it.y-5,4,10); ctx.fillRect(it.x-6,it.y-1,12,6);
+      }
+    }
+
+    // bushes drawn on top to hide tanks below
+    for(const b of state.bushes){ const px=b.x*TILE, py=b.y*TILE; ctx.fillStyle='rgba(35,80,35,0.7)'; ctx.fillRect(px,py,TILE,TILE); }
+  }
+
+  function drawTank(t, color){
+    if (!t) return; 
+    ctx.save(); ctx.translate(t.x,t.y); ctx.rotate(t.dir);
+    // body
+    ctx.fillStyle=color; roundRect(ctx,-14,-12,28,24,4); ctx.fill();
+    // treads
+    ctx.fillStyle='#111'; ctx.fillRect(-14,-12,6,24); ctx.fillRect(8,-12,6,24);
+    // turret
+    ctx.fillStyle='#222'; roundRect(ctx,-6,-6,12,12,3); ctx.fill();
+    // barrel
+    ctx.fillStyle='#333'; ctx.fillRect(0,-3,16,6);
+    ctx.restore();
+  }
+
+  function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); }
+  function brickPattern(px,py){ ctx.strokeStyle='rgba(0,0,0,0.25)'; for(let i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(px+2, py+2+i*7); ctx.lineTo(px+TILE-2, py+2+i*7); ctx.stroke(); } }
+  function wave(px,py){ ctx.strokeStyle='rgba(255,255,255,0.15)'; for(let x=px;x<px+TILE;x+=6){ ctx.beginPath(); ctx.moveTo(x,py+8); ctx.quadraticCurveTo(x+3,py+2,x+6,py+8); ctx.stroke(); }
+    for(let x=px;x<px+TILE;x+=6){ ctx.beginPath(); ctx.moveTo(x,py+20); ctx.quadraticCurveTo(x+3,py+14,x+6,py+20); ctx.stroke(); } }
+
+  // Loop
+  let last=0, rafId=null;
+  function tick(ts){
+    if (!state.running || state.paused){ last=ts; draw(); rafId = requestAnimationFrame(tick); return; }
+    const dt = Math.min(0.033, (ts-last)/1000 || 0); last=ts;
+
+    // Timer
+    state.timeLeft -= dt; if (state.timeLeft<0) state.timeLeft=0;
+
+    // Input
+    const dx = (keys['ArrowRight']?1:0) + (keys['ArrowLeft']?-1:0);
+    const dy = (keys['ArrowDown']?1:0) + (keys['ArrowUp']?-1:0);
+    moveTank(state.player, dt, dx, dy);
+    state.player.cooldown -= dt; if (state.player.cooldown<0) state.player.cooldown=0;
+
+    // AI + bullets + items
+    aiUpdate(dt);
+    updateBullets(dt);
+    updateItems(dt, state.timeLeft);
+
+    // Victory/Defeat conditions during play
+    if (state.timeLeft<=0){
+      // timeout -> if base alive and have lives -> win, else lose
+      state.running=false; state.paused=false;
+      if (state.lives>0 && !state.result){ state.result='win'; log('✅ Hết giờ — Thắng nếu căn cứ an toàn!'); }
+    }
+
+    updateHUD();
+    draw();
+
+    // Maintain spawn flow
+    ensureSpawns();
+
+    rafId = requestAnimationFrame(tick);
+  }
+
+  // Buttons
+  ui.start.addEventListener('click', ()=>{ reset(); state.running=true; state.paused=false; ui.pause.textContent='Tạm dừng'; log('▶️ Bắt đầu!'); });
+  ui.pause.addEventListener('click', ()=>{ if(!state.running) return; state.paused = !state.paused; ui.pause.textContent = state.paused? 'Tiếp tục' : 'Tạm dừng'; });
+
+  // Boot
+  reset();
+  rafId = requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
