@@ -9,10 +9,12 @@
     --bg:#0f1115; --panel:#141821; --hud:#1b2130; --accent:#6cf; --good:#46e38c; --bad:#ff6b6b; --warn:#ffd166;
   }
   html,body{height:100%;margin:0;background:var(--bg);color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;}
+
+
   .wrap{display:grid;grid-template-columns:auto 520px;gap:18px;place-content:center;min-height:100%;padding:16px}
   .panel{background:var(--panel);border:1px solid #222a3a;border-radius:16px;box-shadow:0 6px 30px rgba(0,0,0,.35)}
   #gameHolder{padding:16px}
-  #gameCanvas{image-rendering:pixelated;background:#5b7c5f;border-radius:12px;border:2px solid #2a3347}
+  #gameCanvas{image-rendering:pixelated;background:#5b7c5f;border-radius:12px;border:2px solid #2a3347;cursor: crosshair;}
   #hud{display:grid;grid-template-rows:auto 1fr auto;gap:12px;padding:16px}
   .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
   .badge{padding:6px 10px;border-radius:999px;background:var(--hud);border:1px solid #263048}
@@ -148,7 +150,7 @@
   // Entities
   class Tank{
     constructor(x,y,enemy=false,type='player'){
-      this.x=x; this.y=y; // pixel
+      this.x=x; this.y=y; // pixel (center)
       this.dir=0; // radians
       this.speed = enemy? 60: 90; // px/s
       this.size=22; // collision radius
@@ -182,6 +184,7 @@
     items:[], itemSchedule:[],
     starCollected:0, shovelCollected:0,
     result:null,
+    mouse: {x:0, y:0, inside:false}, // <— thêm trạng thái chuột
   };
 
   // Spawns
@@ -269,8 +272,21 @@
   });
   window.addEventListener('keyup',e=>{ keys[e.code]=false; });
 
+  // === Điều khiển chuột (mới thêm) ===
+  canvas.addEventListener('mousemove', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    state.mouse.x = e.clientX - rect.left;
+    state.mouse.y = e.clientY - rect.top;
+    state.mouse.inside = true;
+  });
+  canvas.addEventListener('mouseleave', ()=>{ state.mouse.inside = false; });
+  canvas.addEventListener('mousedown', (e)=>{
+    if (e.button===0){ shoot(state.player); }
+  });
+
   function shoot(tank){
     if (tank.cooldown>0) return;
+    // Bắn từ tâm (giữ nguyên spec cũ) theo hướng hiện tại của nòng
     const b = new Bullet(tank.x, tank.y, tank.dir, tank.power, tank);
     state.bullets.push(b);
     tank.cooldown = tank.fireDelay;
@@ -299,6 +315,7 @@
       const ny = tank.y + dy*tank.speed*dt;
       if (isFreeCircle(nx, tank.y, tank.size*0.6)) tank.x = nx;
       if (isFreeCircle(tank.x, ny, tank.size*0.6)) tank.y = ny;
+      // AI và địch xoay theo hướng di chuyển; người chơi sẽ bị override bởi chuột ở tick()
       tank.dir = Math.atan2(dy,dx);
     }
   }
@@ -347,7 +364,7 @@
           if (e.hp<=0){
             // kill
             const killedType = e.type;
-            state.enemies.splice(j,1); state.enemiesAlive--; 
+            state.enemies.splice(j,1); state.enemiesAlive--;
             const pts = (killedType==='armored'?200:100);
             state.score += pts;
             log(`💥 Hạ ${killedType==='armored'?'Amored':'Basic'} tank (+${pts}đ)`);
@@ -521,7 +538,7 @@
   }
 
   function drawTank(t, color){
-    if (!t) return; 
+    if (!t) return;
     ctx.save(); ctx.translate(t.x,t.y); ctx.rotate(t.dir);
     // body
     ctx.fillStyle=color; roundRect(ctx,-14,-12,28,24,4); ctx.fill();
@@ -553,6 +570,11 @@
     const dy = (keys['ArrowDown']?1:0) + (keys['ArrowUp']?-1:0);
     moveTank(state.player, dt, dx, dy);
     state.player.cooldown -= dt; if (state.player.cooldown<0) state.player.cooldown=0;
+
+    // >>> Override hướng của tank theo chuột (nòng luôn nhìn theo chuột) <<<
+    if (state.mouse.inside){
+      state.player.dir = Math.atan2(state.mouse.y - state.player.y, state.mouse.x - state.player.x);
+    }
 
     // AI + bullets + items
     aiUpdate(dt);
